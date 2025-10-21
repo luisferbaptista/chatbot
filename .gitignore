@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+bot.out.log
+bot.err.log
+
+# Data files
+*.json
+!requirements.json
+!package.json
+
+# FFmpeg binaries (too large for GitHub)
+ffmpeg/
+ffmpeg.zip
+
+# Python installer
+*.exe
+
+# OS
+.DS_Store
+Thumbs.db
+
