@@ -236,20 +236,28 @@ def logout():
     st.rerun()
 
 def sync_context_to_bot():
-    """Sincronizar contexto del perfil activo al bot EN TIEMPO REAL"""
+    """Sincronizar contexto del perfil activo al bot EN TIEMPO REAL
+    
+    Ahora soporta múltiples perfiles activos con prioridades
+    """
     try:
         pm = st.session_state.profile_manager
-        context = pm.get_active_profile_context()
+        
+        # Usar contexto combinado de múltiples perfiles
+        context = pm.get_multi_profile_context()
         
         # Guardar contexto en archivo que el bot lee
         with open("active_profile_context.txt", 'w', encoding='utf-8') as f:
             f.write(context)
         
         # También actualizar timestamp de sincronización
+        active_profiles = pm.get_active_profiles()
         sync_info = {
             "last_sync": datetime.now().isoformat(),
-            "profile": pm.profiles.get("active_profile"),
-            "context_length": len(context)
+            "profile": pm.profiles.get("active_profile"),  # Retrocompatibilidad
+            "active_profiles": active_profiles,
+            "context_length": len(context),
+            "multi_profile_mode": len(active_profiles) > 1
         }
         
         with open("sync_status.json", 'w', encoding='utf-8') as f:
@@ -872,36 +880,43 @@ with st.sidebar:
     st.markdown(f'<h2 style="color: {text_color}; font-size: 1.5rem; margin-bottom: 1rem;">📋 Navegación</h2>', unsafe_allow_html=True)
     page = st.radio(
         "Selecciona una sección",
-        ["🏠  Dashboard", "📊  Perfiles", "📝  Editor de Versiones", 
+        ["🏠  Dashboard", "📊  Perfiles", "🎯  Perfiles Múltiples", "📝  Editor de Versiones", 
          "📚  Documentos", "🧠  Base de Conocimientos", "⚙️  Configuración"],
         label_visibility="collapsed"
     )
     
     st.markdown("---")
     
-    # Perfil activo global
-    st.markdown(f'<h3 style="color: {text_color}; font-size: 1.2rem; margin-bottom: 1rem;">🎯 Perfil Activo Global</h3>', unsafe_allow_html=True)
-    active = pm.get_active_profile()
-    if active:
-        st.markdown(f"""
-        <div class="success-box" style="margin-bottom: 1rem;">
-            <div style="display: flex; align-items: center; gap: 0.5rem;">
-                <span style="font-size: 1.5rem;">✅</span>
-                <div>
-                    <strong>{active['name']}</strong><br>
-                    <small>Versión: {active['active_version']}</small>
+    # Perfiles activos (múltiples)
+    st.markdown(f'<h3 style="color: {text_color}; font-size: 1.2rem; margin-bottom: 1rem;">🎯 Perfiles Activos</h3>', unsafe_allow_html=True)
+    active_profiles = pm.get_active_profiles()
+    
+    if active_profiles:
+        for ap in active_profiles:
+            profile_data = pm.get_profile(ap['name'])
+            if profile_data:
+                priority_emoji = "🥇" if ap['priority'] == 1 else "🥈" if ap['priority'] == 2 else "🥉" if ap['priority'] == 3 else "🔹"
+                st.markdown(f"""
+                <div class="success-box" style="margin-bottom: 0.5rem; padding: 0.75rem;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span style="font-size: 1.2rem;">{priority_emoji}</span>
+                            <div>
+                                <strong>{ap['name'][:20]}</strong><br>
+                                <small>Prioridad: {ap['priority']} | v{profile_data['active_version']}</small>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("🔄  Desactivar", use_container_width=True):
-            pm.profiles["active_profile"] = None
-            pm._save_profiles()
+                """, unsafe_allow_html=True)
+        
+        if st.button("🔄  Desactivar Todos", use_container_width=True):
+            pm.clear_active_profiles()
             if st.session_state.auto_sync:
                 sync_context_to_bot()
             st.rerun()
     else:
-        st.info("⚠️ Sin perfil activo")
+        st.info("⚠️ Sin perfiles activos")
     
     st.markdown("---")
     
@@ -1152,6 +1167,484 @@ elif page == "📊  Perfiles":
                             st.error("❌ Error al importar el perfil")
                     except Exception as e:
                         st.error(f"❌ Error: {e}")
+
+# ===== PÁGINA: PERFILES MÚLTIPLES =====
+elif page == "🎯  Perfiles Múltiples":
+    st.markdown(f'<h2 style="color: {text_color}; display: flex; align-items: center; gap: 0.5rem;"><span>🎯</span><span>Gestión de Perfiles Múltiples</span></h2>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="info-box">
+        <strong>ℹ️ Sistema de Perfiles Múltiples con Prioridades</strong><br>
+        Activa varios perfiles simultáneamente y ajusta su jerarquía de prioridad.<br>
+        • <strong>Prioridad 1:</strong> Mayor prioridad (perfil principal)<br>
+        • <strong>Prioridad 2, 3...</strong>: Perfiles complementarios que extienden el contexto
+    </div>
+    """, unsafe_allow_html=True)
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["🎯 Gestión de Activos", "📤 Exportar CSV", "📥 Importar CSV", "🚗 Catálogo Vehículos"])
+    
+    # TAB: Gestión de Perfiles Activos
+    with tab1:
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.subheader("➕ Activar Perfil")
+            
+            profiles = pm.get_all_profiles()
+            active_profiles = pm.get_active_profiles()
+            active_names = [ap['name'] for ap in active_profiles]
+            
+            if profiles:
+                with st.form("add_active_profile_form"):
+                    profile_to_add = st.selectbox(
+                        "Selecciona perfil",
+                        [p for p in profiles.keys()]
+                    )
+                    
+                    # Sugerir prioridad automática
+                    next_priority = len(active_profiles) + 1
+                    priority = st.number_input(
+                        "Prioridad (1=mayor)",
+                        min_value=1,
+                        max_value=20,
+                        value=next_priority,
+                        help="1 es la mayor prioridad"
+                    )
+                    
+                    if st.form_submit_button("🎯 Activar Perfil", use_container_width=True):
+                        if pm.add_active_profile(profile_to_add, priority):
+                            if st.session_state.auto_sync:
+                                sync_context_to_bot()
+                            st.success(f"✅ Perfil '{profile_to_add}' activado con prioridad {priority}")
+                            st.balloons()
+                            st.rerun()
+                        else:
+                            st.error("❌ Error activando perfil")
+            else:
+                st.info("No hay perfiles disponibles")
+        
+        with col2:
+            st.subheader("📊 Perfiles Actualmente Activos")
+            
+            if active_profiles:
+                for ap in active_profiles:
+                    profile_data = pm.get_profile(ap['name'])
+                    if profile_data:
+                        priority_emoji = "🥇" if ap['priority'] == 1 else "🥈" if ap['priority'] == 2 else "🥉" if ap['priority'] == 3 else "🔹"
+                        
+                        with st.expander(f"{priority_emoji} {ap['name']} - Prioridad {ap['priority']}", expanded=True):
+                            col_a, col_b = st.columns([2, 1])
+                            
+                            with col_a:
+                                st.write(f"**Tipo:** {profile_data.get('type', 'N/A')}")
+                                st.write(f"**Versión activa:** v{profile_data.get('active_version', 1)}")
+                                activated = datetime.fromisoformat(ap['activated_at']).strftime("%d/%m %H:%M")
+                                st.write(f"**Activado:** {activated}")
+                                
+                                # Cambiar prioridad
+                                new_priority = st.number_input(
+                                    "Ajustar prioridad",
+                                    min_value=1,
+                                    max_value=20,
+                                    value=ap['priority'],
+                                    key=f"priority_{ap['name']}"
+                                )
+                                
+                                if new_priority != ap['priority']:
+                                    if st.button(f"💾 Guardar Nueva Prioridad", key=f"save_priority_{ap['name']}"):
+                                        if pm.set_profile_priority(ap['name'], new_priority):
+                                            if st.session_state.auto_sync:
+                                                sync_context_to_bot()
+                                            st.success(f"✅ Prioridad actualizada a {new_priority}")
+                                            st.rerun()
+                            
+                            with col_b:
+                                st.write("")
+                                st.write("")
+                                if st.button("🗑️ Desactivar", key=f"deactivate_{ap['name']}", use_container_width=True):
+                                    if pm.remove_active_profile(ap['name']):
+                                        if st.session_state.auto_sync:
+                                            sync_context_to_bot()
+                                        st.success(f"✅ Perfil desactivado")
+                                        st.rerun()
+                
+                st.markdown("---")
+                
+                col_sync, col_clear = st.columns(2)
+                with col_sync:
+                    if st.button("🔄 Sincronizar Ahora", use_container_width=True, type="primary"):
+                        if sync_context_to_bot():
+                            st.success("✅ Contexto sincronizado")
+                            time.sleep(1)
+                            st.rerun()
+                
+                with col_clear:
+                    if st.button("❌ Desactivar Todos", use_container_width=True):
+                        pm.clear_active_profiles()
+                        if st.session_state.auto_sync:
+                            sync_context_to_bot()
+                        st.success("✅ Todos los perfiles desactivados")
+                        st.rerun()
+            else:
+                st.info("No hay perfiles activos actualmente")
+    
+    # TAB: Exportar a CSV
+    with tab2:
+        st.subheader("📤 Exportar Perfiles a CSV")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("### Exportar Perfil Individual")
+            
+            profiles = pm.get_all_profiles()
+            if profiles:
+                export_profile = st.selectbox(
+                    "Selecciona perfil para exportar",
+                    list(profiles.keys()),
+                    key="export_single_csv"
+                )
+                
+                export_filename_single = st.text_input(
+                    "Nombre del archivo CSV",
+                    f"{export_profile}.csv",
+                    key="export_filename_single"
+                )
+                
+                if st.button("📤 Exportar a CSV", key="export_single_btn"):
+                    try:
+                        if pm.export_profile_to_csv(export_profile, export_filename_single):
+                            st.success(f"✅ Perfil exportado a '{export_filename_single}'")
+                            
+                            # Ofrecer descarga
+                            with open(export_filename_single, 'r', encoding='utf-8') as f:
+                                csv_content = f.read()
+                            
+                            st.download_button(
+                                "⬇️ Descargar CSV",
+                                csv_content,
+                                file_name=export_filename_single,
+                                mime="text/csv"
+                            )
+                        else:
+                            st.error("❌ Error exportando perfil")
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
+            else:
+                st.info("No hay perfiles para exportar")
+        
+        with col2:
+            st.markdown("### Exportar Todos los Perfiles")
+            
+            export_filename_all = st.text_input(
+                "Nombre del archivo CSV consolidado",
+                "todos_los_perfiles.csv",
+                key="export_filename_all"
+            )
+            
+            if st.button("📤 Exportar Todos a CSV", key="export_all_btn"):
+                try:
+                    if pm.export_all_profiles_to_csv(export_filename_all):
+                        st.success(f"✅ Todos los perfiles exportados a '{export_filename_all}'")
+                        
+                        # Ofrecer descarga
+                        with open(export_filename_all, 'r', encoding='utf-8') as f:
+                            csv_content = f.read()
+                        
+                        st.download_button(
+                            "⬇️ Descargar CSV Consolidado",
+                            csv_content,
+                            file_name=export_filename_all,
+                            mime="text/csv"
+                        )
+                    else:
+                        st.error("❌ Error exportando perfiles")
+                except Exception as e:
+                    st.error(f"❌ Error: {e}")
+            
+            st.markdown("---")
+            st.info("""
+            **Formato del CSV consolidado:**
+            
+            Un archivo con todos los perfiles en formato tabla, ideal para edición masiva en Excel.
+            """)
+    
+    # TAB: Importar desde CSV
+    with tab3:
+        st.subheader("📥 Importar Perfiles desde CSV")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("### Importar Perfil Individual")
+            
+            uploaded_csv = st.file_uploader(
+                "Selecciona archivo CSV",
+                type=['csv'],
+                key="import_single_csv"
+            )
+            
+            if uploaded_csv:
+                st.info(f"📄 Archivo: {uploaded_csv.name}")
+                
+                if st.button("📥 Importar Perfil desde CSV", key="import_csv_btn"):
+                    try:
+                        # Guardar temporalmente
+                        temp_path = f"temp_{uploaded_csv.name}"
+                        with open(temp_path, 'wb') as f:
+                            f.write(uploaded_csv.getvalue())
+                        
+                        # Importar
+                        imported_name = pm.import_profile_from_csv(temp_path)
+                        
+                        # Limpiar archivo temporal
+                        os.remove(temp_path)
+                        
+                        if imported_name:
+                            st.success(f"✅ Perfil '{imported_name}' importado exitosamente desde CSV")
+                            st.balloons()
+                            st.rerun()
+                        else:
+                            st.error("❌ Error al importar el perfil desde CSV")
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
+        
+        with col2:
+            st.markdown("### Formato del CSV")
+            
+            st.markdown("""
+            **Estructura esperada del CSV:**
+            
+            El archivo debe tener dos columnas: `Campo` y `Valor`
+            
+            **Campos requeridos:**
+            - `profile_name`: Nombre del perfil
+            - `profile_description`: Descripción
+            - `profile_type`: Tipo (general, asistente, etc.)
+            - `system_prompt`: Prompt del sistema
+            - `context`: Contexto general
+            - `tone`: Tono (profesional, amigable, etc.)
+            - `language`: Idioma (español, inglés, etc.)
+            - `instructions`: Instrucciones separadas por `|`
+            - `examples`: Ejemplos separados por `||`
+            - `restrictions`: Restricciones separadas por `|`
+            - `knowledge_base`: Formato `key1=value1|key2=value2`
+            - `documents`: Formato `name1::content1||name2::content2`
+            
+            **Ejemplo:**
+            ```csv
+            Campo,Valor
+            profile_name,Mi Perfil
+            profile_description,Descripción del perfil
+            profile_type,general
+            system_prompt,Eres un asistente útil
+            context,Contexto general
+            tone,profesional
+            language,español
+            instructions,Instrucción 1|Instrucción 2
+            examples,Ejemplo 1||Ejemplo 2
+            restrictions,Restricción 1|Restricción 2
+            knowledge_base,horario=9-17|email=info@example.com
+            documents,doc1::contenido1||doc2::contenido2
+            ```
+            """)
+            
+            # Botón para descargar plantilla
+            template_csv = """Campo,Valor
+profile_name,Nombre del Perfil
+profile_description,Descripción del perfil
+profile_type,general
+system_prompt,Eres un asistente útil
+context,Contexto general del perfil
+tone,profesional
+language,español
+instructions,Instrucción 1|Instrucción 2|Instrucción 3
+examples,Ejemplo de conversación 1||Ejemplo de conversación 2
+restrictions,Restricción 1|Restricción 2
+knowledge_base,concepto1=valor1|concepto2=valor2
+documents,documento1::contenido del documento 1||documento2::contenido del documento 2"""
+            
+            st.download_button(
+                "📥 Descargar Plantilla CSV",
+                template_csv,
+                file_name="plantilla_perfil.csv",
+                mime="text/csv"
+            )
+    
+    # TAB: Importar Catálogo de Vehículos
+    with tab4:
+        st.subheader("🚗 Importar Catálogo de Vehículos desde CSV")
+        
+        st.markdown(f"""
+        <div class="info-box">
+            <strong>📋 Formato del CSV de Vehículos</strong><br>
+            El archivo CSV debe contener las siguientes columnas (en cualquier orden):<br>
+            <code>id, marca, modelo, version, año, tipo_carroceria, transmision, capacidad_combustible_lt, 
+            colores, modelo_motor, potencia_hp, cilindrada, neumaticos, puertas, asientos, 
+            equipamiento_destacado, garantia_años, garantia_km, link_foto</code><br><br>
+            Cada fila representa un vehículo del catálogo que será agregado automáticamente a la base de conocimientos del bot.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("### 📥 Importar Catálogo")
+            
+            # Nombre del perfil
+            catalog_profile_name = st.text_input(
+                "Nombre del perfil (opcional)",
+                placeholder="Catálogo de Vehículos",
+                help="Si no especificas un nombre, se usará 'Catálogo de Vehículos'"
+            )
+            
+            # Subir archivo CSV
+            uploaded_catalog = st.file_uploader(
+                "Selecciona el archivo CSV con el catálogo de vehículos",
+                type=['csv'],
+                key="upload_vehicle_catalog"
+            )
+            
+            if uploaded_catalog:
+                st.info(f"📄 Archivo: {uploaded_catalog.name}")
+                
+                # Vista previa de las primeras filas
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(uploaded_catalog, encoding='utf-8')
+                    uploaded_catalog.seek(0)  # Reset para poder leer de nuevo
+                    
+                    st.write(f"**📊 Vista Previa** ({len(df)} vehículos encontrados):")
+                    st.dataframe(df.head(3), use_container_width=True)
+                    
+                    # Verificar columnas requeridas
+                    required_columns = [
+                        'id', 'marca', 'modelo', 'version', 'año', 'tipo_carroceria', 
+                        'transmision', 'capacidad_combustible_lt', 'colores',
+                        'modelo_motor', 'potencia_hp', 'cilindrada', 'neumaticos',
+                        'puertas', 'asientos', 'equipamiento_destacado',
+                        'garantia_años', 'garantia_km', 'link_foto'
+                    ]
+                    
+                    missing_columns = [col for col in required_columns if col not in df.columns]
+                    
+                    if missing_columns:
+                        st.warning(f"⚠️ Columnas faltantes (se usará 'N/A'): {', '.join(missing_columns)}")
+                    else:
+                        st.success("✅ Todas las columnas requeridas están presentes")
+                    
+                except Exception as e:
+                    st.error(f"Error leyendo vista previa: {e}")
+                
+                st.markdown("---")
+                
+                if st.button("🚗 Importar Catálogo de Vehículos", key="import_catalog_btn", type="primary", use_container_width=True):
+                    try:
+                        with st.spinner("Importando catálogo... Esto puede tomar unos segundos..."):
+                            # Guardar temporalmente
+                            temp_path = f"temp_catalog_{uploaded_catalog.name}"
+                            with open(temp_path, 'wb') as f:
+                                f.write(uploaded_catalog.getvalue())
+                            
+                            # Importar catálogo
+                            profile_name_to_use = catalog_profile_name if catalog_profile_name else None
+                            imported_name = pm.import_vehicle_catalog_from_csv(temp_path, profile_name_to_use)
+                            
+                            # Limpiar archivo temporal
+                            os.remove(temp_path)
+                            
+                            if imported_name:
+                                st.success(f"""
+                                ✅ **¡Catálogo importado exitosamente!**
+                                
+                                📁 Perfil creado: **{imported_name}**
+                                🚗 Vehículos importados: **{len(df)}**
+                                
+                                El perfil incluye:
+                                - ✅ Información completa de cada vehículo en la base de conocimientos
+                                - ✅ Resumen del catálogo por marcas
+                                - ✅ Índice de búsqueda rápida por tipo y transmisión
+                                - ✅ Instrucciones para asesoría de ventas
+                                - ✅ Ejemplos de conversación
+                                
+                                **Próximos pasos:**
+                                1. Ve a "🎯 Gestión de Activos" para activar el perfil
+                                2. Asigna una prioridad apropiada
+                                3. Sincroniza con el bot
+                                4. ¡Prueba preguntando sobre los vehículos!
+                                """)
+                                st.balloons()
+                                
+                                # Opción para activar directamente
+                                if st.button("🎯 Activar este perfil ahora", key="activate_catalog_now"):
+                                    if pm.add_active_profile(imported_name, 1):
+                                        if st.session_state.auto_sync:
+                                            sync_context_to_bot()
+                                        st.success(f"✅ Perfil '{imported_name}' activado con prioridad 1")
+                                        st.rerun()
+                            else:
+                                st.error("❌ Error al importar el catálogo. Revisa el formato del archivo.")
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+        
+        with col2:
+            st.markdown("### 📝 Formato Requerido")
+            
+            st.markdown("""
+            **Columnas obligatorias del CSV:**
+            
+            | Columna | Descripción | Ejemplo |
+            |---------|-------------|---------|
+            | `id` | Identificador único | VEH001 |
+            | `marca` | Marca del vehículo | BAIC |
+            | `modelo` | Modelo | X35 |
+            | `version` | Versión del modelo | Comfort |
+            | `año` | Año del modelo | 2025 |
+            | `tipo_carroceria` | Tipo | Sedan |
+            | `transmision` | Tipo de transmisión | Automática |
+            | `capacidad_combustible_lt` | Capacidad en litros | 50 |
+            | `colores` | Colores disponibles | Blanco, Negro, Plata |
+            | `modelo_motor` | Modelo del motor | 2.0L DOHC |
+            | `potencia_hp` | Potencia en HP | 168 |
+            | `cilindrada` | Cilindrada | 1998 cc |
+            | `neumaticos` | Medida neumáticos | 215/55R17 |
+            | `puertas` | Número de puertas | 4 |
+            | `asientos` | Número de asientos | 5 |
+            | `equipamiento_destacado` | Equipamiento | ABS, Airbags, A/C |
+            | `garantia_años` | Garantía en años | 3 |
+            | `garantia_km` | Garantía en kilómetros | 100000 |
+            | `link_foto` | URL de imagen | https://... |
+            
+            **Notas importantes:**
+            - Las columnas pueden estar en cualquier orden
+            - Usa UTF-8 como encoding del archivo
+            - Separa múltiples valores con comas (ej: colores)
+            - Si falta alguna columna, se usará 'N/A'
+            """)
+            
+            st.markdown("---")
+            
+            # Plantilla de ejemplo
+            st.markdown("### 📥 Descargar Plantilla")
+            
+            template_vehicles = """id,marca,modelo,version,año,tipo_carroceria,transmision,capacidad_combustible_lt,colores,modelo_motor,potencia_hp,cilindrada,neumaticos,puertas,asientos,equipamiento_destacado,garantia_años,garantia_km,link_foto
+VEH001,Toyota,Corolla,XLE Premium,2024,Sedan,Automática,50,"Blanco, Negro, Plata, Azul",2.0L DOHC,168,1998 cc,215/55R17,4,5,"ABS, Control de estabilidad, 8 airbags, A/C automático, Cámara retroceso, Pantalla táctil 9 pulgadas, Apple CarPlay",3,100000,https://ejemplo.com/corolla.jpg
+VEH002,Honda,CR-V,Touring,2024,SUV,Automática CVT,57,"Rojo, Blanco, Negro, Gris",1.5L Turbo,190,1498 cc,235/60R18,5,7,"AWD, Sensor de punto ciego, Alerta de colisión, Techo panorámico, Asientos de cuero, Sistema de sonido premium",3,100000,https://ejemplo.com/crv.jpg
+VEH003,Ford,F-150,Lariat 4x4,2024,Pickup,Automática,98,"Azul, Negro, Blanco, Rojo",3.5L V6 EcoBoost,400,3496 cc,275/65R18,4,6,"4WD, Control de tracción, Caja de carga reforzada, Sistema Pro Trailer, SYNC 4, Asientos calefaccionados",5,160000,https://ejemplo.com/f150.jpg"""
+            
+            st.download_button(
+                "📥 Descargar Plantilla de Catálogo",
+                template_vehicles,
+                file_name="plantilla_catalogo_vehiculos.csv",
+                mime="text/csv",
+                help="Descarga esta plantilla como ejemplo del formato correcto"
+            )
+            
+            st.info("""
+            💡 **Tip**: Puedes editar la plantilla en Excel o Google Sheets 
+            y guardarla como CSV (UTF-8) para importarla.
+            """)
 
 # ===== PÁGINA: EDITOR DE VERSIONES =====
 elif page == "📝  Editor de Versiones":
@@ -1510,10 +2003,30 @@ elif page == "⚙️  Configuración":
     with tab2:
         st.subheader("Vista Previa del Contexto Activo")
         
-        context = pm.get_active_profile_context()
+        # Usar contexto combinado de múltiples perfiles
+        context = pm.get_multi_profile_context()
+        active_profiles = pm.get_active_profiles()
         
         if context:
+            # Mostrar información de perfiles activos
+            if len(active_profiles) > 1:
+                st.markdown(f"""
+                <div class="info-box">
+                    <strong>🎯 Modo Multi-Perfil Activado</strong><br>
+                    Se están combinando {len(active_profiles)} perfiles según su prioridad.
+                </div>
+                """, unsafe_allow_html=True)
+            
             st.text_area("Contexto completo que se enviará al bot:", value=context, height=400)
+            
+            # Estadísticas del contexto
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Caracteres", len(context))
+            with col2:
+                st.metric("Palabras", len(context.split()))
+            with col3:
+                st.metric("Perfiles Activos", len(active_profiles))
             
             st.download_button(
                 "⬇️ Descargar Contexto",
@@ -1536,11 +2049,10 @@ elif page == "⚙️  Configuración":
         """)
         
         if st.button("🔄 Sincronizar Ahora"):
-            context = pm.get_active_profile_context()
-            # Guardar contexto en archivo que el bot pueda leer
-            with open("active_profile_context.txt", 'w', encoding='utf-8') as f:
-                f.write(context)
-            st.success("✅ Contexto sincronizado con el bot")
+            # Usar la función de sincronización actualizada
+            if sync_context_to_bot():
+                st.success("✅ Contexto multi-perfil sincronizado con el bot")
+                st.balloons()
 
 # Footer
 st.markdown("---")

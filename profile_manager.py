@@ -1,12 +1,14 @@
 """
 Sistema de Gestión de Perfiles para el Chatbot
 Maneja perfiles, versiones, documentos y contexto para entrenar el bot
+Soporta múltiples perfiles activos con prioridades y carga/exportación CSV
 """
 
 import json
 import os
+import csv
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import hashlib
 
 
@@ -32,7 +34,8 @@ class ProfileManager:
         """Crear estructura por defecto de perfiles"""
         return {
             "profiles": {},
-            "active_profile": None,
+            "active_profile": None,  # Mantener por retrocompatibilidad
+            "active_profiles": [],  # Nuevo: lista de {name, priority}
             "metadata": {
                 "created_at": datetime.now().isoformat(),
                 "last_modified": datetime.now().isoformat(),
@@ -378,5 +381,710 @@ class ProfileManager:
             return profile_name
         except Exception as e:
             print(f"Error importando perfil: {e}")
+            return None
+    
+    # ===== GESTIÓN DE MÚLTIPLES PERFILES ACTIVOS CON PRIORIDADES =====
+    
+    def add_active_profile(self, profile_name: str, priority: int = 1) -> bool:
+        """Agregar un perfil a la lista de perfiles activos con prioridad
+        
+        Args:
+            profile_name: Nombre del perfil a activar
+            priority: Prioridad del perfil (1=mayor prioridad, números mayores=menor prioridad)
+        
+        Returns:
+            True si se agregó exitosamente, False en caso contrario
+        """
+        if profile_name not in self.profiles["profiles"]:
+            return False
+        
+        # Inicializar active_profiles si no existe (retrocompatibilidad)
+        if "active_profiles" not in self.profiles:
+            self.profiles["active_profiles"] = []
+        
+        # Verificar si el perfil ya está activo
+        for active in self.profiles["active_profiles"]:
+            if active["name"] == profile_name:
+                # Actualizar solo la prioridad si ya existe
+                active["priority"] = priority
+                self._save_profiles()
+                return True
+        
+        # Agregar nuevo perfil activo
+        self.profiles["active_profiles"].append({
+            "name": profile_name,
+            "priority": priority,
+            "activated_at": datetime.now().isoformat()
+        })
+        
+        # Ordenar por prioridad (menor número = mayor prioridad)
+        self.profiles["active_profiles"].sort(key=lambda x: x["priority"])
+        
+        # Mantener compatibilidad: actualizar active_profile al de mayor prioridad
+        if self.profiles["active_profiles"]:
+            self.profiles["active_profile"] = self.profiles["active_profiles"][0]["name"]
+        
+        self._save_profiles()
+        return True
+    
+    def remove_active_profile(self, profile_name: str) -> bool:
+        """Remover un perfil de la lista de perfiles activos
+        
+        Args:
+            profile_name: Nombre del perfil a desactivar
+        
+        Returns:
+            True si se removió exitosamente, False si no estaba activo
+        """
+        if "active_profiles" not in self.profiles:
+            self.profiles["active_profiles"] = []
+        
+        initial_length = len(self.profiles["active_profiles"])
+        self.profiles["active_profiles"] = [
+            p for p in self.profiles["active_profiles"] 
+            if p["name"] != profile_name
+        ]
+        
+        # Actualizar active_profile para retrocompatibilidad
+        if self.profiles["active_profiles"]:
+            self.profiles["active_profile"] = self.profiles["active_profiles"][0]["name"]
+        else:
+            self.profiles["active_profile"] = None
+        
+        if len(self.profiles["active_profiles"]) < initial_length:
+            self._save_profiles()
+            return True
+        
+        return False
+    
+    def get_active_profiles(self) -> List[Dict]:
+        """Obtener lista de perfiles activos ordenados por prioridad
+        
+        Returns:
+            Lista de diccionarios con {name, priority, activated_at}
+        """
+        if "active_profiles" not in self.profiles:
+            self.profiles["active_profiles"] = []
+        
+        return self.profiles["active_profiles"]
+    
+    def set_profile_priority(self, profile_name: str, new_priority: int) -> bool:
+        """Cambiar la prioridad de un perfil activo
+        
+        Args:
+            profile_name: Nombre del perfil
+            new_priority: Nueva prioridad (1=mayor, números mayores=menor)
+        
+        Returns:
+            True si se actualizó, False si el perfil no está activo
+        """
+        if "active_profiles" not in self.profiles:
+            self.profiles["active_profiles"] = []
+        
+        updated = False
+        for active in self.profiles["active_profiles"]:
+            if active["name"] == profile_name:
+                active["priority"] = new_priority
+                updated = True
+                break
+        
+        if updated:
+            # Reordenar por prioridad
+            self.profiles["active_profiles"].sort(key=lambda x: x["priority"])
+            
+            # Actualizar active_profile para retrocompatibilidad
+            if self.profiles["active_profiles"]:
+                self.profiles["active_profile"] = self.profiles["active_profiles"][0]["name"]
+            
+            self._save_profiles()
+            return True
+        
+        return False
+    
+    def clear_active_profiles(self):
+        """Desactivar todos los perfiles"""
+        self.profiles["active_profiles"] = []
+        self.profiles["active_profile"] = None
+        self._save_profiles()
+    
+    def get_multi_profile_context(self) -> str:
+        """Obtener el contexto combinado de todos los perfiles activos según prioridad
+        
+        Los perfiles se combinan jerárquicamente:
+        - El perfil de mayor prioridad (1) se aplica primero
+        - Los perfiles de menor prioridad complementan/extienden el contexto
+        
+        Returns:
+            Contexto combinado de todos los perfiles activos
+        """
+        if "active_profiles" not in self.profiles or not self.profiles["active_profiles"]:
+            # Fallback a método original para retrocompatibilidad
+            return self.get_active_profile_context()
+        
+        active_profiles = self.get_active_profiles()
+        
+        if not active_profiles:
+            return ""
+        
+        # Construir contexto combinado
+        combined_parts = []
+        
+        # Header indicando perfiles activos
+        if len(active_profiles) > 1:
+            combined_parts.append("=" * 80)
+            combined_parts.append("CONFIGURACIÓN DE PERFILES MÚLTIPLES")
+            combined_parts.append("Los siguientes perfiles están activos con sus prioridades:")
+            for ap in active_profiles:
+                combined_parts.append(f"  • {ap['name']} (Prioridad: {ap['priority']})")
+            combined_parts.append("=" * 80)
+            combined_parts.append("")
+        
+        # Procesar cada perfil según prioridad
+        for idx, active_prof in enumerate(active_profiles):
+            profile = self.get_profile(active_prof["name"])
+            if not profile:
+                continue
+            
+            version = self.get_version(profile["name"], profile["active_version"])
+            if not version:
+                continue
+            
+            priority = active_prof["priority"]
+            profile_name = active_prof["name"]
+            
+            # Separador de perfil
+            if len(active_profiles) > 1:
+                combined_parts.append("")
+                combined_parts.append("=" * 80)
+                combined_parts.append(f"PERFIL: {profile_name} | PRIORIDAD: {priority}")
+                combined_parts.append("=" * 80)
+                combined_parts.append("")
+            
+            # System prompt
+            if version.get("system_prompt"):
+                if idx == 0:  # Solo el perfil principal tiene system prompt
+                    combined_parts.append(f"SYSTEM PROMPT:\n{version['system_prompt']}\n")
+                else:
+                    combined_parts.append(f"CONTEXTO ADICIONAL ({profile_name}):\n{version['system_prompt']}\n")
+            
+            # Contexto general
+            if version.get("context"):
+                combined_parts.append(f"CONTEXTO:\n{version['context']}\n")
+            
+            # Instrucciones
+            if version.get("instructions"):
+                combined_parts.append(f"INSTRUCCIONES ({profile_name}):")
+                for idx_inst, instruction in enumerate(version["instructions"], 1):
+                    combined_parts.append(f"{idx_inst}. {instruction}")
+                combined_parts.append("")
+            
+            # Base de conocimientos
+            if version.get("knowledge_base"):
+                combined_parts.append(f"BASE DE CONOCIMIENTOS ({profile_name}):")
+                for key, data in version["knowledge_base"].items():
+                    combined_parts.append(f"• {key}: {data['value']}")
+                combined_parts.append("")
+            
+            # Ejemplos
+            if version.get("examples"):
+                combined_parts.append(f"EJEMPLOS ({profile_name}):")
+                for example in version["examples"]:
+                    combined_parts.append(f"• {example}")
+                combined_parts.append("")
+            
+            # Restricciones
+            if version.get("restrictions"):
+                combined_parts.append(f"RESTRICCIONES ({profile_name}):")
+                for restriction in version["restrictions"]:
+                    combined_parts.append(f"• {restriction}")
+                combined_parts.append("")
+            
+            # Documentos
+            if version.get("documents"):
+                combined_parts.append(f"DOCUMENTOS DE REFERENCIA ({profile_name}):")
+                for doc in version["documents"]:
+                    combined_parts.append(f"\n--- {doc['name']} ---")
+                    combined_parts.append(doc['content'])
+                combined_parts.append("")
+        
+        # Tono y lenguaje del perfil principal
+        if active_profiles:
+            main_profile = self.get_profile(active_profiles[0]["name"])
+            if main_profile:
+                main_version = self.get_version(main_profile["name"], main_profile["active_version"])
+                if main_version:
+                    combined_parts.append("")
+                    combined_parts.append("=" * 80)
+                    combined_parts.append(f"TONO PRINCIPAL: {main_version.get('tone', 'profesional')}")
+                    combined_parts.append(f"IDIOMA PRINCIPAL: {main_version.get('language', 'español')}")
+                    combined_parts.append("=" * 80)
+        
+        return "\n".join(combined_parts)
+    
+    # ===== IMPORTACIÓN Y EXPORTACIÓN CSV =====
+    
+    def export_profile_to_csv(self, profile_name: str, csv_path: str) -> bool:
+        """Exportar un perfil a formato CSV
+        
+        El CSV incluirá la versión activa del perfil con todos sus componentes
+        
+        Args:
+            profile_name: Nombre del perfil a exportar
+            csv_path: Ruta del archivo CSV de destino
+        
+        Returns:
+            True si se exportó exitosamente
+        """
+        profile = self.get_profile(profile_name)
+        if not profile:
+            return False
+        
+        version = self.get_version(profile_name, profile["active_version"])
+        if not version:
+            return False
+        
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                
+                # Header
+                writer.writerow(['Campo', 'Valor'])
+                
+                # Metadata del perfil
+                writer.writerow(['profile_name', profile['name']])
+                writer.writerow(['profile_description', profile.get('description', '')])
+                writer.writerow(['profile_type', profile.get('type', 'general')])
+                writer.writerow(['profile_id', profile.get('id', '')])
+                writer.writerow(['active_version', profile.get('active_version', 1)])
+                
+                # Datos de la versión
+                writer.writerow(['system_prompt', version.get('system_prompt', '')])
+                writer.writerow(['context', version.get('context', '')])
+                writer.writerow(['tone', version.get('tone', 'profesional')])
+                writer.writerow(['language', version.get('language', 'español')])
+                
+                # Instrucciones (separadas por |)
+                instructions = version.get('instructions', [])
+                writer.writerow(['instructions', '|'.join(instructions)])
+                
+                # Ejemplos (separados por ||)
+                examples = version.get('examples', [])
+                writer.writerow(['examples', '||'.join(examples)])
+                
+                # Restricciones (separadas por |)
+                restrictions = version.get('restrictions', [])
+                writer.writerow(['restrictions', '|'.join(restrictions)])
+                
+                # Base de conocimientos (formato: key1=value1|key2=value2)
+                kb = version.get('knowledge_base', {})
+                kb_str = '|'.join([f"{k}={v['value']}" for k, v in kb.items()])
+                writer.writerow(['knowledge_base', kb_str])
+                
+                # Documentos (formato: name1::content1||name2::content2)
+                docs = version.get('documents', [])
+                docs_str = '||'.join([f"{doc['name']}::{doc['content']}" for doc in docs])
+                writer.writerow(['documents', docs_str])
+            
+            return True
+        except Exception as e:
+            print(f"Error exportando a CSV: {e}")
+            return False
+    
+    def import_profile_from_csv(self, csv_path: str) -> Optional[str]:
+        """Importar un perfil desde archivo CSV
+        
+        Args:
+            csv_path: Ruta del archivo CSV a importar
+        
+        Returns:
+            Nombre del perfil importado o None si hubo error
+        """
+        try:
+            data = {}
+            
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                
+                for row in reader:
+                    if len(row) >= 2:
+                        data[row[0]] = row[1]
+            
+            # Crear perfil
+            profile_name = data.get('profile_name', 'Imported Profile')
+            description = data.get('profile_description', '')
+            profile_type = data.get('profile_type', 'general')
+            
+            # Verificar si ya existe y agregar sufijo
+            original_name = profile_name
+            counter = 1
+            while profile_name in self.profiles["profiles"]:
+                profile_name = f"{original_name}_{counter}"
+                counter += 1
+            
+            # Crear el perfil
+            profile = self.create_profile(profile_name, description, profile_type)
+            
+            # Actualizar versión 1 con los datos del CSV
+            version_data = {
+                'system_prompt': data.get('system_prompt', ''),
+                'context': data.get('context', ''),
+                'tone': data.get('tone', 'profesional'),
+                'language': data.get('language', 'español'),
+                'instructions': data.get('instructions', '').split('|') if data.get('instructions') else [],
+                'examples': data.get('examples', '').split('||') if data.get('examples') else [],
+                'restrictions': data.get('restrictions', '').split('|') if data.get('restrictions') else [],
+            }
+            
+            # Filtrar valores vacíos
+            version_data['instructions'] = [i for i in version_data['instructions'] if i.strip()]
+            version_data['examples'] = [e for e in version_data['examples'] if e.strip()]
+            version_data['restrictions'] = [r for r in version_data['restrictions'] if r.strip()]
+            
+            # Knowledge base
+            kb_str = data.get('knowledge_base', '')
+            if kb_str:
+                for kb_item in kb_str.split('|'):
+                    if '=' in kb_item:
+                        key, value = kb_item.split('=', 1)
+                        self.add_to_knowledge_base(profile_name, 1, key, value)
+            
+            # Documentos
+            docs_str = data.get('documents', '')
+            if docs_str:
+                for doc_item in docs_str.split('||'):
+                    if '::' in doc_item:
+                        doc_name, doc_content = doc_item.split('::', 1)
+                        self.add_document(profile_name, 1, doc_name, doc_content, 'text')
+            
+            # Actualizar versión con los datos
+            self.update_version_content(profile_name, 1, **version_data)
+            
+            return profile_name
+            
+        except Exception as e:
+            print(f"Error importando desde CSV: {e}")
+            return None
+    
+    def export_all_profiles_to_csv(self, csv_path: str) -> bool:
+        """Exportar todos los perfiles a un archivo CSV consolidado
+        
+        Args:
+            csv_path: Ruta del archivo CSV de destino
+        
+        Returns:
+            True si se exportó exitosamente
+        """
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                
+                # Header
+                writer.writerow([
+                    'profile_name', 'profile_description', 'profile_type', 
+                    'system_prompt', 'context', 'tone', 'language',
+                    'instructions', 'examples', 'restrictions', 
+                    'knowledge_base', 'documents'
+                ])
+                
+                # Exportar cada perfil
+                for profile_name, profile in self.profiles["profiles"].items():
+                    version = self.get_version(profile_name, profile["active_version"])
+                    if not version:
+                        continue
+                    
+                    instructions = '|'.join(version.get('instructions', []))
+                    examples = '||'.join(version.get('examples', []))
+                    restrictions = '|'.join(version.get('restrictions', []))
+                    
+                    kb = version.get('knowledge_base', {})
+                    kb_str = '|'.join([f"{k}={v['value']}" for k, v in kb.items()])
+                    
+                    docs = version.get('documents', [])
+                    docs_str = '||'.join([f"{doc['name']}::{doc['content']}" for doc in docs])
+                    
+                    writer.writerow([
+                        profile['name'],
+                        profile.get('description', ''),
+                        profile.get('type', 'general'),
+                        version.get('system_prompt', ''),
+                        version.get('context', ''),
+                        version.get('tone', 'profesional'),
+                        version.get('language', 'español'),
+                        instructions,
+                        examples,
+                        restrictions,
+                        kb_str,
+                        docs_str
+                    ])
+            
+            return True
+        except Exception as e:
+            print(f"Error exportando todos los perfiles a CSV: {e}")
+            return False
+    
+    # ===== IMPORTACIÓN DE CATÁLOGO DE VEHÍCULOS =====
+    
+    def import_vehicle_catalog_from_csv(self, csv_path: str, profile_name: str = None) -> Optional[str]:
+        """Importar catálogo de vehículos desde CSV con formato de tabla
+        
+        El CSV debe tener las siguientes columnas:
+        id, marca, modelo, version, año, tipo_carroceria, transmision, capacidad_combustible_lt,
+        colores, modelo_motor, potencia_hp, cilindrada, neumaticos, puertas, asientos,
+        equipamiento_destacado, garantia_años, garantia_km, link_foto
+        
+        Cada fila representa un vehículo que se agregará a la base de conocimientos
+        
+        Args:
+            csv_path: Ruta del archivo CSV con el catálogo
+            profile_name: Nombre opcional para el perfil (si no se especifica, se usa "Catálogo de Vehículos")
+        
+        Returns:
+            Nombre del perfil creado o None si hubo error
+        """
+        try:
+            # Leer CSV
+            vehicles = []
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    vehicles.append(row)
+            
+            if not vehicles:
+                print("No se encontraron vehículos en el CSV")
+                return None
+            
+            # Nombre del perfil
+            if not profile_name:
+                profile_name = "Catálogo de Vehículos"
+            
+            # Verificar si ya existe y agregar sufijo
+            original_name = profile_name
+            counter = 1
+            while profile_name in self.profiles["profiles"]:
+                profile_name = f"{original_name} {counter}"
+                counter += 1
+            
+            # Crear perfil base
+            description = f"Catálogo de vehículos con {len(vehicles)} modelos importados desde CSV"
+            profile = self.create_profile(profile_name, description, "ventas")
+            
+            # System prompt especializado para vehículos
+            system_prompt = """Eres un experto asesor de ventas de vehículos. Tienes conocimiento completo del catálogo de vehículos disponibles y puedes ayudar a los clientes a encontrar el vehículo perfecto según sus necesidades, presupuesto y preferencias.
+
+Cuando un cliente pregunte sobre vehículos:
+1. Identifica sus necesidades (tamaño, uso, presupuesto, preferencias)
+2. Recomienda modelos específicos del catálogo
+3. Destaca características relevantes (motor, equipamiento, colores disponibles)
+4. Proporciona detalles técnicos cuando se soliciten
+5. Ayuda a comparar diferentes modelos
+6. Facilita el proceso de decisión con información clara y precisa"""
+            
+            # Contexto general
+            context = f"""Este perfil contiene información detallada sobre {len(vehicles)} vehículos en nuestro catálogo. 
+Cada vehículo incluye especificaciones técnicas completas, equipamiento, colores disponibles y más.
+
+El catálogo se actualiza regularmente y toda la información ha sido importada y verificada."""
+            
+            # Instrucciones específicas
+            instructions = [
+                "Saluda cordialmente y pregunta qué tipo de vehículo está buscando el cliente",
+                "Identifica necesidades clave: uso del vehículo, número de pasajeros, tipo de conducción",
+                "Recomienda vehículos específicos del catálogo basándote en las necesidades",
+                "Proporciona detalles técnicos precisos del catálogo cuando se soliciten",
+                "Destaca el equipamiento y características únicas de cada modelo",
+                "Menciona los colores disponibles cuando sea relevante",
+                "Ofrece comparaciones entre modelos cuando el cliente esté indeciso",
+                "Proporciona información sobre motores, potencia y consumo",
+                "Si tienes foto disponible, ofrece mostrarla al cliente",
+                "Mantén un tono profesional pero amigable y consultivo"
+            ]
+            
+            # Actualizar perfil con configuración base
+            self.update_version_content(
+                profile_name, 
+                1,
+                system_prompt=system_prompt,
+                context=context,
+                instructions=instructions,
+                tone="profesional",
+                language="español"
+            )
+            
+            # Agregar cada vehículo a la base de conocimientos
+            for idx, vehicle in enumerate(vehicles):
+                vehicle_id = vehicle.get('id', f'VEH_{idx+1}')
+                marca = vehicle.get('marca', 'N/A')
+                modelo = vehicle.get('modelo', 'N/A')
+                version = vehicle.get('version', 'N/A')
+                año = vehicle.get('año', 'N/A')
+                
+                # Crear clave única para el vehículo
+                kb_key = f"{marca}_{modelo}_{version}_{año}_{vehicle_id}".replace(' ', '_')
+                
+                # Construir descripción completa del vehículo
+                vehicle_info = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚗 {marca} {modelo} {version} ({año})
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📋 INFORMACIÓN GENERAL:
+• ID: {vehicle.get('id', 'N/A')}
+• Marca: {marca}
+• Modelo: {modelo}
+• Versión: {version}
+• Año: {año}
+• Tipo de Carrocería: {vehicle.get('tipo_carroceria', 'N/A')}
+
+🔧 ESPECIFICACIONES TÉCNICAS:
+• Motor: {vehicle.get('modelo_motor', 'N/A')}
+• Potencia: {vehicle.get('potencia_hp', 'N/A')} HP
+• Cilindrada: {vehicle.get('cilindrada', 'N/A')}
+• Transmisión: {vehicle.get('transmision', 'N/A')}
+• Capacidad de Combustible: {vehicle.get('capacidad_combustible_lt', 'N/A')} litros
+
+🚙 CARACTERÍSTICAS:
+• Puertas: {vehicle.get('puertas', 'N/A')}
+• Asientos: {vehicle.get('asientos', 'N/A')}
+• Neumáticos: {vehicle.get('neumaticos', 'N/A')}
+
+🎨 COLORES DISPONIBLES:
+{vehicle.get('colores', 'N/A')}
+
+⭐ EQUIPAMIENTO DESTACADO:
+{vehicle.get('equipamiento_destacado', 'N/A')}
+
+🛡️ GARANTÍA:
+• Años: {vehicle.get('garantia_años', 'N/A')} año(s)
+• Kilómetros: {vehicle.get('garantia_km', 'N/A')} km
+
+📸 IMAGEN:
+{vehicle.get('link_foto', 'No disponible')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+                
+                # Agregar a la base de conocimientos
+                self.add_to_knowledge_base(profile_name, 1, kb_key, vehicle_info.strip())
+            
+            # Crear documento resumen del catálogo
+            summary_lines = [
+                "═" * 60,
+                f"📊 RESUMEN DEL CATÁLOGO - {len(vehicles)} VEHÍCULOS",
+                "═" * 60,
+                ""
+            ]
+            
+            # Agrupar por marca
+            vehicles_by_brand = {}
+            for vehicle in vehicles:
+                marca = vehicle.get('marca', 'Sin marca')
+                if marca not in vehicles_by_brand:
+                    vehicles_by_brand[marca] = []
+                vehicles_by_brand[marca].append(vehicle)
+            
+            for marca, brand_vehicles in sorted(vehicles_by_brand.items()):
+                summary_lines.append(f"\n🏷️ {marca.upper()} ({len(brand_vehicles)} modelos):")
+                for v in brand_vehicles:
+                    modelo = v.get('modelo', 'N/A')
+                    año = v.get('año', 'N/A')
+                    version = v.get('version', '')
+                    summary_lines.append(f"  • {modelo} {año} {version}".strip())
+            
+            summary_lines.append("\n" + "═" * 60)
+            summary_content = "\n".join(summary_lines)
+            
+            self.add_document(
+                profile_name, 
+                1, 
+                "Resumen del Catálogo",
+                summary_content,
+                "catálogo"
+            )
+            
+            # Crear documento con índice de búsqueda rápida
+            index_lines = [
+                "═" * 60,
+                "🔍 ÍNDICE DE BÚSQUEDA RÁPIDA",
+                "═" * 60,
+                "",
+                "Busca vehículos por características:",
+                ""
+            ]
+            
+            # Índice por tipo de carrocería
+            by_body = {}
+            for v in vehicles:
+                body_type = v.get('tipo_carroceria', 'Otro')
+                if body_type not in by_body:
+                    by_body[body_type] = []
+                by_body[body_type].append(f"{v.get('marca')} {v.get('modelo')} {v.get('año')}")
+            
+            index_lines.append("\n📦 POR TIPO DE CARROCERÍA:")
+            for body_type, models in sorted(by_body.items()):
+                index_lines.append(f"\n{body_type}:")
+                for model in models:
+                    index_lines.append(f"  • {model}")
+            
+            # Índice por transmisión
+            by_trans = {}
+            for v in vehicles:
+                trans = v.get('transmision', 'N/A')
+                if trans not in by_trans:
+                    by_trans[trans] = []
+                by_trans[trans].append(f"{v.get('marca')} {v.get('modelo')} {v.get('año')}")
+            
+            index_lines.append("\n\n⚙️ POR TRANSMISIÓN:")
+            for trans, models in sorted(by_trans.items()):
+                index_lines.append(f"\n{trans}:")
+                for model in models:
+                    index_lines.append(f"  • {model}")
+            
+            index_lines.append("\n" + "═" * 60)
+            index_content = "\n".join(index_lines)
+            
+            self.add_document(
+                profile_name,
+                1,
+                "Índice de Búsqueda",
+                index_content,
+                "índice"
+            )
+            
+            # Agregar ejemplos de conversación
+            examples = [
+                f"Cliente: ¿Qué vehículos tienen disponibles?\nBot: ¡Excelente! Tenemos {len(vehicles)} modelos en nuestro catálogo de {', '.join(set(v.get('marca', '') for v in vehicles))}. ¿Qué tipo de vehículo estás buscando? ¿Sedan, SUV, pickup?",
+                f"Cliente: Busco un SUV familiar.\nBot: Perfecto, tenemos excelentes opciones de SUV. ¿Cuántos pasajeros necesitas transportar regularmente y cuál es tu presupuesto aproximado?",
+                "Cliente: ¿Este modelo viene en color rojo?\nBot: Déjame verificar los colores disponibles para ese modelo específicamente. [Consulta la información de colores del vehículo en la base de conocimientos]"
+            ]
+            
+            self.update_version_content(
+                profile_name,
+                1,
+                examples=examples
+            )
+            
+            # Agregar restricciones
+            restrictions = [
+                "No inventar especificaciones o características que no estén en el catálogo",
+                "Siempre verificar la información en la base de conocimientos antes de responder",
+                "No prometer disponibilidad sin confirmar primero",
+                "No proporcionar precios sin autorización",
+                "Dirigir al cliente a un vendedor para finalizar la compra"
+            ]
+            
+            self.update_version_content(
+                profile_name,
+                1,
+                restrictions=restrictions
+            )
+            
+            print(f"✅ Catálogo importado exitosamente: {len(vehicles)} vehículos agregados al perfil '{profile_name}'")
+            return profile_name
+            
+        except Exception as e:
+            print(f"Error importando catálogo de vehículos: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
